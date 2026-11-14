@@ -65,6 +65,10 @@ def evaluate(p, val, metas):
     res["ic_strong"], res["n_strong"] = mean_ic(mu, yq, mq, strong)
     res["ic_regime"], _ = mean_ic(mu, yq, mq, regime)
     res["ic_null"], _ = mean_ic(mu, yq, mq, null)
+    # the best CONSTANT predictive scale with the same mean: does the transformer's scale head add anything?
+    mu_val = np.asarray(jnp.asarray(rq) @ p["a_r"])
+    grid = np.exp(np.linspace(-0.6, 0.6, 25)); costs = [(np.asarray(pfn.student_t_nll(jnp.asarray(yq), jnp.asarray(mu_val), jnp.full_like(jnp.asarray(mu_val), np.log(g)))) * mq).sum() / w for g in grid]
+    res["nll_const_scale"] = float(min(costs))
     best = None
     for lam in (30, 100, 300, 1000):
         r = ridge_mu(xc, yc, mc, xq, lam); ic, _ = mean_ic(r, yq, mq); icr, _ = mean_ic(r, yq, mq, regime); ics, _ = mean_ic(r, yq, mq, strong)
@@ -75,8 +79,8 @@ def evaluate(p, val, metas):
 
 
 def fmt(r):
-    return ("NLL %.4f vs no-skill %.4f (gain %+.4f) | IC all %+.4f  strong-signal %+.4f  regime %+.4f  null %+.4f || best in-context ridge (lam %d): IC all %+.4f  strong %+.4f  regime %+.4f"
-            % (r["nll"], r["nll_noskill"], r["nll_noskill"] - r["nll"], r["ic_all"], r["ic_strong"], r["ic_regime"], r["ic_null"], r["ridge_lam"], r["ic_ridge_all"], r["ic_ridge_strong"], r["ic_ridge_regime"]))
+    return ("NLL %.4f vs best constant scale %.4f (transformer scale gain %+.4f) | no-skill %.4f | " % (r["nll"], r["nll_const_scale"], r["nll_const_scale"] - r["nll"], r["nll_noskill"])) + (" IC all %+.4f  strong-signal %+.4f  regime %+.4f  null %+.4f || best single in-context ridge (lam %d): IC all %+.4f  strong %+.4f  regime %+.4f"
+            % (r["ic_all"], r["ic_strong"], r["ic_regime"], r["ic_null"], r["ridge_lam"], r["ic_ridge_all"], r["ic_ridge_strong"], r["ic_ridge_regime"]))
 
 
 def main(seconds: float, total=config.PRETRAIN_STEPS, eval_every=600):
@@ -84,6 +88,10 @@ def main(seconds: float, total=config.PRETRAIN_STEPS, eval_every=600):
         p, extra = pfn.load_params(CK); step = int(extra["step"])
     else:
         p, step = pfn.init_params(0), 0
+    if step == 0:
+        rng0 = np.random.default_rng(777)
+        a = pfn.fit_stacking(prior.sample_batch(rng0, 64) for _ in range(40))                 # 2,560 tasks at the realistic prior
+        p["a_r"] = jnp.asarray(a); print("  stacking weights over the 4 ridge variants (lam30, lam300, tau10, tau30):", np.round(a, 4), flush=True)
     opt = pfn._adam_init(p)
     val, metas = make_val()
     rng = np.random.default_rng(1000 + step)
@@ -92,9 +100,7 @@ def main(seconds: float, total=config.PRETRAIN_STEPS, eval_every=600):
         print("  eval:", fmt(evaluate(p, val, metas)), flush=True)
     t0 = time.time(); losses = []
     while time.time() - t0 < seconds and step < total:
-        frac = min(1.0, step / (0.5 * total))
-        r2h = config.CURRICULUM_R2_START * (config.PRIOR_R2_HIGH / config.CURRICULUM_R2_START) ** frac
-        b = [jnp.asarray(a) for a in prior.sample_batch(rng, r2_high=r2h)]
+        b = [jnp.asarray(a) for a in prior.sample_batch(rng)]       # the realistic prior throughout: the mean is fixed, only the scale is trained
         p, opt, l = pfn.train_step(p, opt, pfn.lr_at(step, config.LR, total=total), *b)
         losses.append(float(l)); step += 1
         if step % 200 == 0:

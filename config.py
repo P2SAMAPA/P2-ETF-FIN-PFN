@@ -57,15 +57,22 @@ M_CTX = 160            # context rows per episode (sampled from the recent windo
 Q_MAX = 44             # max queries (ETFs) per episode
 CTX_DAYS = 60          # the recent window the context is drawn from
 NU = 5.0
-ENSEMBLE_R = 8         # at inference average over R random context subsets of the same window
+# The transformer's mean correction is switched OFF: with CPU-scale pre-training it could not learn corrections that beat the in-context
+# ridge it is fed (validation IC fell from +0.016 to +0.001..0.005 when it was allowed to). The mean is a learned combination of the four
+# in-context ridge predictions (shrinkage and recency learned); the transformer learns the predictive SCALE. Set to 1.0 to re-enable
+# the correction if you pre-train for far longer (GPU-scale).
+MU_CORRECTION = 0.0
+ENSEMBLE_R = 4         # at inference average over R random context subsets of the same window
 
 # Training
 BATCH = 32
 LR = 2e-3
 LR_FINETUNE = 3e-4
 WARMUP = 200
-PRETRAIN_STEPS = 6000
-FINETUNE_STEPS = 300
+PRETRAIN_STEPS = 1000
+FINETUNE_STEPS = 150
+STACK_EPISODES = 640          # real windows used to refit the stacking weights before each block
+STACK_PRIOR_STRENGTH = 0.5    # the real-data stacking fit is shrunk toward the prior's weights (half the data's information)
 GRAD_CLIP = 1.0
 
 # Synthetic prior: realistic LOW signal-to-noise (R^2 of the true relationship per row, log-uniform), 25% pure-null

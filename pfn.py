@@ -22,7 +22,8 @@ def init_params(seed: int = 0):
     ks = iter(jax.random.split(k, 6 + 8 * L))
     dense = lambda a, b, s=1.0: jax.random.normal(next(ks), (a, b)) * (s / np.sqrt(a))
     p = {"w_x": dense(F, D), "w_c": dense(3, D), "w_r": dense(4, D), "q_emb": jnp.zeros(D), "layers": [],
-         "lnf_g": jnp.ones(D), "lnf_b": jnp.zeros(D), "head": jnp.zeros((D, 2)), "head_b": jnp.zeros(2)}
+         "lnf_g": jnp.ones(D), "lnf_b": jnp.zeros(D), "head": jnp.zeros((D, 2)), "head_b": jnp.zeros(2),
+         "a_r": jnp.array([0.1, 0.0, 0.0, 0.0])}      # residual: mean = learned correction + a . (in-context ridge predictions); starts at half-shrunk ridge
     for _ in range(L):
         p["layers"].append({"wq": dense(D, D), "wk": dense(D, D), "wv": dense(D, D), "wo": dense(D, D, 0.5),
                             "ln1_g": jnp.ones(D), "ln1_b": jnp.zeros(D), "w1": dense(D, FF), "b1": jnp.zeros(FF),
@@ -56,7 +57,9 @@ def forward(p, xc, yc, ac, mc, xq, rq, mq):
         x = _ln(h, lp["ln2_g"], lp["ln2_b"])
         h = h + jax.nn.gelu(x @ lp["w1"] + lp["b1"]) @ lp["w2"] + lp["b2"]
     out = _ln(h[:, M:], p["lnf_g"], p["lnf_b"]) @ p["head"] + p["head_b"]
-    return out[..., 0], jnp.clip(out[..., 1], -3.0, 3.0)
+    # the stacking weights a_r are fit in closed form (fit_stacking), never by SGD: with this little signal their gradients are
+    # almost pure noise and Adam random-walks them (they were being destroyed within ~900 steps)
+    return out[..., 0] * config.MU_CORRECTION + rq @ jax.lax.stop_gradient(p["a_r"]), jnp.clip(out[..., 1], -3.0, 3.0)
 
 
 def student_t_nll(y, mu, log_s, nu=config.NU):
@@ -68,6 +71,17 @@ def loss_fn(p, xc, yc, ac, mc, xq, rq, yq, mq):
     mu, log_s = forward(p, xc, yc, ac, mc, xq, rq, mq)
     nll = student_t_nll(yq, mu, log_s)
     return (nll * mq).sum() / jnp.maximum(mq.sum(), 1.0)
+
+
+def fit_stacking(batches, ridge=1e-6):
+    """Closed-form least squares of the target on the 4 in-context ridge predictions, pooled over many episodes: the learned
+    shrinkage / recency weights. batches: iterable of (xc,yc,ac,mc,xq,rq,yq,mq)."""
+    A = np.zeros((4, 4)); b = np.zeros(4)
+    for (xc, yc, ac, mc, xq, rq, yq, mq) in batches:
+        m = mq > 0
+        r, y = rq[m], yq[m]
+        A += r.T @ r; b += r.T @ y
+    return np.linalg.solve(A + ridge * np.eye(4), b).astype(np.float32)
 
 
 def _adam_init(p):
